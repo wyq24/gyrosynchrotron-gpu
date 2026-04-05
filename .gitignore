@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+artifacts/
+source/*.o
+source/MWTransferArr.so
+source/MWTransferArr.buildinfo
+examples/__pycache__/
+.codex/
