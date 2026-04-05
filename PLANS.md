@@ -71,6 +71,15 @@ Possible outcomes:
 - `opt/fp32-salvage`
 - work only one branch at a time, after ROI comparison
 
+Current branch decision:
+
+- `opt/fp32-salvage` is paused as a diagnostic branch
+- catastrophic FP32 failure classes were removed, but `FP32` is still not acceptable
+- the remaining source is the corrected-root / `FindMu0` / `H1` / `lnq2` path
+- a local selective mixed-precision attempt regressed and was reverted
+- any further FP32 work would require broader mixed precision and is not the current priority
+- active attention moves to `opt/fused-native-rl`
+
 ## Acceptance Criteria
 
 ### For The Current Milestone
@@ -147,6 +156,10 @@ python3 tools/phase2_benchmark.py --mode compare-fp64 --workload real-sweep --re
   - real-sweep wrapper `right`: max rel `1.158e-01`
   - stress-sweep wrapper `left`: max rel `7.342e-03`
   - stress-sweep wrapper `right`: max rel `3.239e-03`
+- FP32 diagnosis stop point:
+  - remaining error traced to corrected-root precision sensitivity, not the wrapper itself
+  - a root-only local mixed-precision attempt regressed and was reverted
+  - no retained code change was accepted on `opt/fp32-salvage`
 
 ## Benchmark Commands
 
@@ -166,5 +179,6 @@ python3 tools/phase2_benchmark.py --backend cuda --precision fp64 --repeats 3 --
 
 - Stop if `FP32` shows unexpected `inf`/`nan` or severe instability on the supported path.
 - Stop if `FP32` does not offer a worthwhile performance tradeoff against CUDA `FP64`.
+- Stop if the remaining FP32 issue requires broader mixed precision in nonlinear corrected-root logic.
 - Stop if supporting the current narrow path would require broadening into exact GS, array DF, transport, or API redesign.
 - Stop if validation requires modifying the legacy single-call path.
