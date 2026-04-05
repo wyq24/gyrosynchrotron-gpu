@@ -106,6 +106,18 @@ def _run_native_wrapper(libname, batch, backend, precision):
     return kernel, wrapper
 
 
+def _run_native_wrapper_integrated(libname, batch, backend, precision, debug=False):
+    return GScodes.run_powerlaw_iso_batch_wrapper(
+        libname,
+        batch,
+        backend=backend,
+        precision=precision,
+        npoints=16,
+        q_on=True,
+        debug=debug,
+    )
+
+
 def validate_cpu_reference(libname, batch_size, workload, top_k):
     libname = phase1_workloads.default_library_path(libname)
     batch = _build_batch(workload, batch_size)
@@ -174,7 +186,8 @@ def validate_wrapper_against_reference(libname, batch_size, backend, precision, 
         )
 
     batch = _build_batch(workload, batch_size)
-    kernel, wrapper_rl = _run_native_wrapper(libname, batch, backend=backend, precision=precision)
+    kernel = GScodes.run_powerlaw_iso_batch_native(libname, batch, backend=backend, precision=precision, npoints=16, q_on=True)
+    wrapper_rl = _run_native_wrapper_integrated(libname, batch, backend=backend, precision=precision)
     reference_rl = _run_single_reference_rl(libname, batch)
 
     if not np.array_equal(kernel.status, reference_rl.status):
@@ -195,6 +208,45 @@ def validate_wrapper_against_reference(libname, batch_size, backend, precision, 
         "workload": workload,
         "backend": backend,
         "precision": precision,
+        "postprocess_path": wrapper_rl.postprocess_path,
+        "postprocess_reason": wrapper_rl.postprocess_reason,
+        "metrics": metrics,
+    }
+
+
+def validate_integrated_wrapper_against_python(libname, batch_size, backend, precision, workload, top_k, debug=False):
+    libname = phase1_workloads.default_library_path(libname)
+    if backend == "cuda" and not GScodes.cuda_available(libname):
+        raise RuntimeError(
+            f"CUDA backend is not available in the loaded library: {libname}. "
+            "Build with CUDA=1 and run on a machine with accessible NVIDIA runtime support."
+        )
+
+    batch = _build_batch(workload, batch_size)
+    kernel, python_wrapper = _run_native_wrapper(libname, batch, backend=backend, precision=precision)
+    integrated_wrapper = _run_native_wrapper_integrated(libname, batch, backend=backend, precision=precision, debug=debug)
+
+    if not np.array_equal(kernel.status, integrated_wrapper.status):
+        raise AssertionError("Python and integrated wrapper status arrays differ")
+
+    metrics = {}
+    for name in ["left", "right"]:
+        row_index = WRAPPER_COMPARE_ROWS[name]
+        metrics[name] = _compute_error_report(
+            integrated_wrapper.rl[row_index, :, :],
+            python_wrapper.rl[row_index, :, :],
+            integrated_wrapper.native_freq_hz,
+            top_k,
+        )
+
+    return {
+        "library": libname,
+        "batch_size": batch_size,
+        "workload": workload,
+        "backend": backend,
+        "precision": precision,
+        "postprocess_path": integrated_wrapper.postprocess_path,
+        "postprocess_reason": integrated_wrapper.postprocess_reason,
         "metrics": metrics,
     }
 
@@ -225,6 +277,10 @@ def _print_validation_result(header, result, report_names):
         print(f"backend: {result['backend']}")
     if "precision" in result:
         print(f"precision: {result['precision']}")
+    if "postprocess_path" in result:
+        print(f"postprocess_path: {result['postprocess_path']}")
+    if "postprocess_reason" in result and result["postprocess_reason"]:
+        print(f"postprocess_reason: {result['postprocess_reason']}")
     for name, metrics in result["metrics"].items():
         _print_metric_report(name, metrics, name in report_names)
 
@@ -248,6 +304,10 @@ def _run_target(args, batch_size):
         return validate_wrapper_against_reference(args.lib, batch_size, "cuda", "fp64", args.workload, args.top_k)
     if args.target == "wrapper-cuda-fp32":
         return validate_wrapper_against_reference(args.lib, batch_size, "cuda", "fp32", args.workload, args.top_k)
+    if args.target == "wrapper-integrated-cpu-fp64":
+        return validate_integrated_wrapper_against_python(args.lib, batch_size, "cpu", "fp64", args.workload, args.top_k, debug=args.debug_postprocess)
+    if args.target == "wrapper-integrated-cuda-fp64":
+        return validate_integrated_wrapper_against_python(args.lib, batch_size, "cuda", "fp64", args.workload, args.top_k, debug=args.debug_postprocess)
     raise ValueError(f"Unsupported target {args.target!r}")
 
 
@@ -276,9 +336,16 @@ def main():
             "cuda-fp32",
             "wrapper-cuda-fp64",
             "wrapper-cuda-fp32",
+            "wrapper-integrated-cpu-fp64",
+            "wrapper-integrated-cuda-fp64",
         ],
         default="cpu-reference",
         help="Validation target to run.",
+    )
+    parser.add_argument(
+        "--debug-postprocess",
+        action="store_true",
+        help="Print the integrated wrapper postprocess path decision.",
     )
     parser.add_argument("--top-k", type=int, default=10, help="How many worst cases to retain per reported metric.")
     parser.add_argument(

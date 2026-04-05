@@ -48,6 +48,13 @@ struct MWApproxBatchOutputs
  double *ko{};
 };
 
+struct MWApproxBatchRlOutputs
+{
+ int *status{};
+ double *freq_hz{};
+ double *rl{};
+};
+
 struct MWApproxBatchTiming
 {
  double total_seconds{};
@@ -62,6 +69,7 @@ struct MWApproxBatchTiming
 };
 
 int MWApproxBatchRun(const MWApproxBatchConfig *config, const MWApproxBatchInputs *inputs, const MWApproxBatchOutputs *outputs);
+int MWApproxBatchRunRL(const MWApproxBatchConfig *config, const MWApproxBatchInputs *inputs, const MWApproxBatchRlOutputs *outputs, double d_sun_au);
 int MWApproxBatchCudaAvailable(void);
 void MWApproxBatchTimingReset(void);
 void MWApproxBatchTimingGet(MWApproxBatchTiming *timing);

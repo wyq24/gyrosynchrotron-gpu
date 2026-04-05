@@ -65,3 +65,30 @@ Narrowest native-side work with the biggest expected gain:
 - unsupported cases still fail loudly
 - the current validated baseline on `main` and `baseline/fp64-validated` stays unchanged
 - the new fast path reduces the wrapper/backend gap on realistic batch sizes
+
+## Integration Milestone
+
+The additive native `RL` path is now wired into the normal supported Python batch workflow through `run_powerlaw_iso_batch_wrapper(...)`.
+
+Fast-path conditions are intentionally narrow:
+
+- `AnalyticalPowerLawIsoBatch`
+- `precision == fp64`
+- `npoints == 16`
+- `q_on == True`
+- `d_sun_au == 1.0`
+- `nu_cr_factor == 0.0`
+- `nu_wh_factor == 0.0`
+
+If any of those conditions are not met, the workflow falls back to the existing explicit local `j/k` plus Python `RL` postprocess path.
+
+Observability:
+
+- result metadata: `postprocess_path`, `postprocess_reason`
+- simple/debug mode: `run_powerlaw_iso_batch_wrapper(..., debug=True)`
+
+Validated integrated behavior on the supported CUDA `FP64` path:
+
+- integrated workflow vs old explicit Python `RL` postprocess: exact match on tested real/stress suites
+- integrated workflow vs single-call reference: unchanged validated `FP64` agreement
+- end-to-end timing now tracks much closer to the backend path than the old Python-postprocess workflow
