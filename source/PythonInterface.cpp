@@ -93,6 +93,52 @@ extern "C" double pyMW_Approx_Batch(int backend, int precision, int batch_size, 
 }
 
 #ifndef LINUX
+extern "C" __declspec(dllexport) int pyMW_Approx_Batch_RL(int backend, int precision, int batch_size, int nfreq, int npoints, int q_on,
+                                                          double nu0_hz, double dlog10_nu,
+                                                          double *area_cm2, double *depth_cm, double *bmag_g, double *temperature_k,
+                                                          double *thermal_density_cm3, double *nonthermal_density_cm3, double *delta,
+                                                          double *theta_deg, double *emin_mev, double *emax_mev, double d_sun_au,
+                                                          int *status, double *freq_hz, double *rl)
+#else
+extern "C" double pyMW_Approx_Batch_RL(int backend, int precision, int batch_size, int nfreq, int npoints, int q_on,
+                                       double nu0_hz, double dlog10_nu,
+                                       double *area_cm2, double *depth_cm, double *bmag_g, double *temperature_k,
+                                       double *thermal_density_cm3, double *nonthermal_density_cm3, double *delta,
+                                       double *theta_deg, double *emin_mev, double *emax_mev, double d_sun_au,
+                                       int *status, double *freq_hz, double *rl)
+#endif
+{
+ MWApproxBatchConfig config;
+ config.backend=backend;
+ config.precision=precision;
+ config.batch_size=batch_size;
+ config.nfreq=nfreq;
+ config.npoints=npoints;
+ config.q_on=q_on;
+ config.nu0_hz=nu0_hz;
+ config.dlog10_nu=dlog10_nu;
+
+ MWApproxBatchInputs inputs;
+ inputs.area_cm2=area_cm2;
+ inputs.depth_cm=depth_cm;
+ inputs.bmag_g=bmag_g;
+ inputs.temperature_k=temperature_k;
+ inputs.thermal_density_cm3=thermal_density_cm3;
+ inputs.nonthermal_density_cm3=nonthermal_density_cm3;
+ inputs.delta=delta;
+ inputs.theta_deg=theta_deg;
+ inputs.emin_mev=emin_mev;
+ inputs.emax_mev=emax_mev;
+
+ MWApproxBatchRlOutputs outputs;
+ outputs.status=status;
+ outputs.freq_hz=freq_hz;
+ outputs.rl=rl;
+
+ return MWApproxBatchRunRL(&config, &inputs, &outputs, d_sun_au);
+}
+
+#ifndef LINUX
 extern "C" __declspec(dllexport) int pyMW_Approx_Batch_CudaAvailable(void)
 #else
 extern "C" double pyMW_Approx_Batch_CudaAvailable(void)
