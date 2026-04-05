@@ -143,6 +143,39 @@ def benchmark_native_wrapper(libname, backend, precision, repeats, batch_sizes, 
     return rows
 
 
+def benchmark_native_integrated_wrapper(libname, backend, precision, repeats, batch_sizes, workload):
+    libname = phase1_workloads.default_library_path(libname)
+    if backend == "cuda" and not GScodes.cuda_available(libname):
+        raise RuntimeError(
+            f"CUDA backend is not available in the loaded library: {libname}. "
+            "Build with CUDA=1 and run on a machine with accessible NVIDIA runtime support."
+        )
+
+    rows = []
+    for batch_size in batch_sizes:
+        batch = _build_batch(workload, batch_size)
+
+        def run_once():
+            GScodes.run_powerlaw_iso_batch_wrapper(
+                libname,
+                batch,
+                backend=backend,
+                precision=precision,
+                npoints=16,
+                q_on=True,
+            )
+
+        rows.append(
+            _summarize_samples(
+                f"native-{backend}-integrated-wrapper-{precision}",
+                batch_size,
+                _timeit(run_once, repeats),
+                batch_size * batch.nfreq * 2,
+            )
+        )
+    return rows
+
+
 def benchmark_legacy_wrapper(libname, repeats, batch_sizes, workload):
     libname = phase1_workloads.default_library_path(libname)
     rows = []
@@ -174,6 +207,8 @@ def benchmark_compare_fp64(libname, repeats, batch_sizes, workload):
     rows.extend(benchmark_native_backend(libname, "cuda", "fp64", repeats, batch_sizes, workload))
     rows.extend(benchmark_native_wrapper(libname, "cpu", "fp64", repeats, batch_sizes, workload))
     rows.extend(benchmark_native_wrapper(libname, "cuda", "fp64", repeats, batch_sizes, workload))
+    rows.extend(benchmark_native_integrated_wrapper(libname, "cpu", "fp64", repeats, batch_sizes, workload))
+    rows.extend(benchmark_native_integrated_wrapper(libname, "cuda", "fp64", repeats, batch_sizes, workload))
     return rows
 
 
@@ -184,6 +219,15 @@ def benchmark_compare_fp32(libname, repeats, batch_sizes, workload):
     rows.extend(benchmark_native_backend(libname, "cuda", "fp32", repeats, batch_sizes, workload))
     rows.extend(benchmark_native_wrapper(libname, "cuda", "fp64", repeats, batch_sizes, workload))
     rows.extend(benchmark_native_wrapper(libname, "cuda", "fp32", repeats, batch_sizes, workload))
+    return rows
+
+
+def benchmark_compare_integrated_fp64(libname, repeats, batch_sizes, workload):
+    rows = []
+    rows.extend(benchmark_legacy_wrapper(libname, repeats, batch_sizes, workload))
+    rows.extend(benchmark_native_backend(libname, "cuda", "fp64", repeats, batch_sizes, workload))
+    rows.extend(benchmark_native_wrapper(libname, "cuda", "fp64", repeats, batch_sizes, workload))
+    rows.extend(benchmark_native_integrated_wrapper(libname, "cuda", "fp64", repeats, batch_sizes, workload))
     return rows
 
 
@@ -271,7 +315,7 @@ def main():
     parser.add_argument("--lib", help="Path to the MWTransferArr shared library.")
     parser.add_argument(
         "--mode",
-        choices=["native-backend", "native-wrapper", "compare-fp64", "compare-fp32", "breakdown"],
+        choices=["native-backend", "native-wrapper", "compare-fp64", "compare-fp32", "compare-integrated-fp64", "compare-fused-fp64", "breakdown"],
         default="native-backend",
         help="Benchmark a single native backend or run the full FP64 comparison suite.",
     )
@@ -308,6 +352,23 @@ def main():
         if args.mode == "compare-fp64":
             rows = benchmark_compare_fp64(args.lib, args.repeats, args.batch_sizes, args.workload)
             print("Phase 2 FP64 benchmark comparison")
+            for row in rows:
+                print(
+                    f"{row['path']} batch={row['batch_size']:4d}: "
+                    f"median={row['median_seconds']:.6f}s "
+                    f"p95={row['p95_seconds']:.6f}s "
+                    f"spectra/s={row['spectra_per_second']:.2f} "
+                    f"output_threads={row['output_threads']}"
+                )
+            for row in _speedup_rows(rows):
+                print(
+                    f"speedup batch={row['batch_size']:4d} {row['path']} vs {row['baseline_path']}: "
+                    f"{row['speedup_vs_legacy_wrapper']:.2f}x"
+                )
+            return
+        if args.mode in {"compare-integrated-fp64", "compare-fused-fp64"}:
+            rows = benchmark_compare_integrated_fp64(args.lib, args.repeats, args.batch_sizes, args.workload)
+            print("Phase 2 integrated wrapper FP64 benchmark comparison")
             for row in rows:
                 print(
                     f"{row['path']} batch={row['batch_size']:4d}: "

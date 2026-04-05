@@ -95,6 +95,41 @@ def initMW_Approx_Batch(libname):
     return mwfunc
 
 
+def initMW_Approx_Batch_RL(libname):
+    _int1 = ndpointer(dtype=np.int32, ndim=1, flags="C_CONTIGUOUS")
+    _double1 = ndpointer(dtype=np.float64, ndim=1, flags="C_CONTIGUOUS")
+    _double3f = ndpointer(dtype=np.float64, ndim=3, flags="F_CONTIGUOUS")
+
+    libc_mw = ctypes.CDLL(libname)
+    mwfunc = libc_mw.pyMW_Approx_Batch_RL
+    mwfunc.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_double,
+        ctypes.c_double,
+        _double1,
+        _double1,
+        _double1,
+        _double1,
+        _double1,
+        _double1,
+        _double1,
+        _double1,
+        _double1,
+        _double1,
+        ctypes.c_double,
+        _int1,
+        _double1,
+        _double3f,
+    ]
+    mwfunc.restype = ctypes.c_int
+    return mwfunc
+
+
 def initMW_Approx_Batch_CudaAvailable(libname):
     libc_mw = ctypes.CDLL(libname)
     func = libc_mw.pyMW_Approx_Batch_CudaAvailable
@@ -320,6 +355,8 @@ class BatchRunResult:
     status: np.ndarray
     rl: np.ndarray
     native_freq_hz: np.ndarray
+    postprocess_path: str = "python-rl-fallback"
+    postprocess_reason: str = ""
 
     @property
     def total_intensity(self):
@@ -377,6 +414,8 @@ class NativeBatchProfile:
     postprocess_seconds: float
     total_seconds: float
     native_timing: NativeBatchTiming
+    postprocess_path: str = ""
+    postprocess_reason: str = ""
 
 
 def build_wrapper_powerlaw_iso_batch(
@@ -495,6 +534,55 @@ def get_last_batch_timing(libname=None):
     )
 
 
+def _set_batch_result_postprocess_metadata(result, path_name, reason):
+    result.postprocess_path = str(path_name)
+    result.postprocess_reason = str(reason)
+    return result
+
+
+def _set_profile_postprocess_metadata(profile, path_name, reason):
+    profile.postprocess_path = str(path_name)
+    profile.postprocess_reason = str(reason)
+    return profile
+
+
+def _native_rl_fast_path_decision(batch, *, precision, npoints, q_on, d_sun_au):
+    reasons = []
+    if not isinstance(batch, AnalyticalPowerLawIsoBatch):
+        reasons.append("batch is not AnalyticalPowerLawIsoBatch")
+    if str(precision).lower() != "fp64":
+        reasons.append("precision is not fp64")
+    if int(npoints) != 16:
+        reasons.append("npoints is not the validated value 16")
+    if not bool(q_on):
+        reasons.append("q_on is disabled")
+    if not np.isclose(float(d_sun_au), 1.0):
+        reasons.append("d_sun_au is not the validated value 1.0")
+    if not np.isclose(float(getattr(batch, "nu_cr_factor", 0.0)), 0.0):
+        reasons.append("nu_cr_factor is not 0.0")
+    if not np.isclose(float(getattr(batch, "nu_wh_factor", 0.0)), 0.0):
+        reasons.append("nu_wh_factor is not 0.0")
+
+    if reasons:
+        return {
+            "use_fast_path": False,
+            "path_name": "python-rl-fallback",
+            "reason": "; ".join(reasons),
+        }
+    return {
+        "use_fast_path": True,
+        "path_name": "fused-native-rl-fast-path",
+        "reason": "",
+    }
+
+
+def _emit_native_rl_debug(prefix, path_name, reason):
+    if reason:
+        print(f"{prefix}: {path_name} ({reason})")
+    else:
+        print(f"{prefix}: {path_name}")
+
+
 def run_powerlaw_iso_batch_native(libname, batch, *, backend="cpu", precision="fp64", npoints=16, q_on=True):
     if npoints <= 0:
         raise ValueError("npoints must be positive for the approximate batch backend")
@@ -556,6 +644,99 @@ def run_powerlaw_iso_batch_native(libname, batch, *, backend="cpu", precision="f
         backend=backend_name,
         precision=str(precision).lower(),
     )
+
+
+def run_powerlaw_iso_batch_native_rl(libname, batch, *, backend="cpu", precision="fp64", npoints=16, q_on=True, d_sun_au=1.0):
+    if npoints <= 0:
+        raise ValueError("npoints must be positive for the approximate batch backend")
+    if d_sun_au <= 0.0:
+        raise ValueError("d_sun_au must be positive")
+
+    libname = resolve_library_path(libname)
+    backend_name = str(backend).lower()
+    if backend_name == "cuda" and not cuda_available(libname):
+        raise RuntimeError(
+            f"CUDA backend requested for {libname}, but pyMW_Approx_Batch_CudaAvailable returned 0. "
+            "Build with CUDA=1 on a machine with accessible NVIDIA runtime support."
+        )
+    batch_func = initMW_Approx_Batch_RL(libname)
+
+    status = np.zeros(batch.batch_size, dtype=np.int32)
+    native_freq_hz = np.zeros(batch.nfreq, dtype=np.float64)
+    rl = np.zeros((7, batch.nfreq, batch.batch_size), dtype=np.float64, order="F")
+
+    res = int(
+        batch_func(
+            _native_backend_code(backend_name),
+            _native_precision_code(precision),
+            batch.batch_size,
+            batch.nfreq,
+            int(npoints),
+            int(bool(q_on)),
+            float(batch.nu0_hz),
+            float(batch.dlog10_nu),
+            _batch_array_view(batch.area_cm2),
+            _batch_array_view(batch.depth_cm),
+            _batch_array_view(batch.bmag_g),
+            _batch_array_view(batch.temperature_k),
+            _batch_array_view(batch.thermal_density_cm3),
+            _batch_array_view(batch.nonthermal_density_cm3),
+            _batch_array_view(batch.delta),
+            _batch_array_view(batch.theta_deg),
+            _batch_array_view(batch.emin_mev),
+            _batch_array_view(batch.emax_mev),
+            float(d_sun_au),
+            status,
+            native_freq_hz,
+            rl,
+        )
+    )
+    if res != 0:
+        raise RuntimeError(f"pyMW_Approx_Batch_RL failed with status {res} ({approx_batch_error_name(res)})")
+
+    return _set_batch_result_postprocess_metadata(
+        BatchRunResult(status=status, rl=rl, native_freq_hz=native_freq_hz),
+        "fused-native-rl-fast-path",
+        "",
+    )
+
+
+def run_powerlaw_iso_batch_wrapper(libname, batch, *, backend="cpu", precision="fp64", npoints=16, q_on=True, d_sun_au=1.0, debug=False):
+    decision = _native_rl_fast_path_decision(
+        batch,
+        precision=precision,
+        npoints=npoints,
+        q_on=q_on,
+        d_sun_au=d_sun_au,
+    )
+    if decision["use_fast_path"]:
+        result = run_powerlaw_iso_batch_native_rl(
+            libname,
+            batch,
+            backend=backend,
+            precision=precision,
+            npoints=npoints,
+            q_on=q_on,
+            d_sun_au=d_sun_au,
+        )
+    else:
+        kernel = run_powerlaw_iso_batch_native(
+            libname,
+            batch,
+            backend=backend,
+            precision=precision,
+            npoints=npoints,
+            q_on=q_on,
+        )
+        result = _set_batch_result_postprocess_metadata(
+            local_jk_to_single_voxel_rl(batch, kernel, d_sun_au=d_sun_au),
+            decision["path_name"],
+            decision["reason"],
+        )
+
+    if debug:
+        _emit_native_rl_debug("run_powerlaw_iso_batch_wrapper", result.postprocess_path, result.postprocess_reason)
+    return result
 
 
 def run_powerlaw_iso_batch_native_profiled(libname, batch, *, backend="cpu", precision="fp64", npoints=16, q_on=True, include_postprocess=False):
@@ -658,7 +839,134 @@ def run_powerlaw_iso_batch_native_profiled(libname, batch, *, backend="cpu", pre
         total_seconds=total_seconds,
         native_timing=native_timing,
     )
+    if include_postprocess and wrapper_result is not None:
+        _set_batch_result_postprocess_metadata(wrapper_result, "python-rl-fallback", "explicit local j/k plus Python RL postprocess path")
+        _set_profile_postprocess_metadata(profile, wrapper_result.postprocess_path, wrapper_result.postprocess_reason)
     return kernel_result, wrapper_result, profile
+
+
+def run_powerlaw_iso_batch_native_rl_profiled(libname, batch, *, backend="cpu", precision="fp64", npoints=16, q_on=True, d_sun_au=1.0):
+    total_start = time.perf_counter()
+    bind_start = total_start
+
+    if npoints <= 0:
+        raise ValueError("npoints must be positive for the approximate batch backend")
+    if d_sun_au <= 0.0:
+        raise ValueError("d_sun_au must be positive")
+
+    libname = resolve_library_path(libname)
+    backend_name = str(backend).lower()
+    if backend_name == "cuda" and not cuda_available(libname):
+        raise RuntimeError(
+            f"CUDA backend requested for {libname}, but pyMW_Approx_Batch_CudaAvailable returned 0. "
+            "Build with CUDA=1 on a machine with accessible NVIDIA runtime support."
+        )
+    batch_func = initMW_Approx_Batch_RL(libname)
+    timing_reset = initMW_Approx_Batch_TimingReset(libname)
+    binding_seconds = time.perf_counter() - bind_start
+
+    pack_start = time.perf_counter()
+    status = np.zeros(batch.batch_size, dtype=np.int32)
+    native_freq_hz = np.zeros(batch.nfreq, dtype=np.float64)
+    rl = np.zeros((7, batch.nfreq, batch.batch_size), dtype=np.float64, order="F")
+    area_cm2 = _batch_array_view(batch.area_cm2)
+    depth_cm = _batch_array_view(batch.depth_cm)
+    bmag_g = _batch_array_view(batch.bmag_g)
+    temperature_k = _batch_array_view(batch.temperature_k)
+    thermal_density_cm3 = _batch_array_view(batch.thermal_density_cm3)
+    nonthermal_density_cm3 = _batch_array_view(batch.nonthermal_density_cm3)
+    delta_arr = _batch_array_view(batch.delta)
+    theta_deg = _batch_array_view(batch.theta_deg)
+    emin_mev = _batch_array_view(batch.emin_mev)
+    emax_mev = _batch_array_view(batch.emax_mev)
+    packing_seconds = time.perf_counter() - pack_start
+
+    timing_reset()
+    native_call_start = time.perf_counter()
+    res = int(
+        batch_func(
+            _native_backend_code(backend_name),
+            _native_precision_code(precision),
+            batch.batch_size,
+            batch.nfreq,
+            int(npoints),
+            int(bool(q_on)),
+            float(batch.nu0_hz),
+            float(batch.dlog10_nu),
+            area_cm2,
+            depth_cm,
+            bmag_g,
+            temperature_k,
+            thermal_density_cm3,
+            nonthermal_density_cm3,
+            delta_arr,
+            theta_deg,
+            emin_mev,
+            emax_mev,
+            float(d_sun_au),
+            status,
+            native_freq_hz,
+            rl,
+        )
+    )
+    native_call_seconds = time.perf_counter() - native_call_start
+    if res != 0:
+        raise RuntimeError(f"pyMW_Approx_Batch_RL failed with status {res} ({approx_batch_error_name(res)})")
+
+    native_timing = get_last_batch_timing(libname)
+    total_seconds = time.perf_counter() - total_start
+    profile = NativeBatchProfile(
+        binding_seconds=binding_seconds,
+        packing_seconds=packing_seconds,
+        native_call_seconds=native_call_seconds,
+        call_boundary_seconds=max(native_call_seconds - native_timing.total_seconds, 0.0),
+        postprocess_seconds=0.0,
+        total_seconds=total_seconds,
+        native_timing=native_timing,
+    )
+    result = _set_batch_result_postprocess_metadata(
+        BatchRunResult(status=status, rl=rl, native_freq_hz=native_freq_hz),
+        "fused-native-rl-fast-path",
+        "",
+    )
+    _set_profile_postprocess_metadata(profile, result.postprocess_path, result.postprocess_reason)
+    return result, profile
+
+
+def run_powerlaw_iso_batch_wrapper_profiled(libname, batch, *, backend="cpu", precision="fp64", npoints=16, q_on=True, d_sun_au=1.0, debug=False):
+    decision = _native_rl_fast_path_decision(
+        batch,
+        precision=precision,
+        npoints=npoints,
+        q_on=q_on,
+        d_sun_au=d_sun_au,
+    )
+    if decision["use_fast_path"]:
+        result, profile = run_powerlaw_iso_batch_native_rl_profiled(
+            libname,
+            batch,
+            backend=backend,
+            precision=precision,
+            npoints=npoints,
+            q_on=q_on,
+            d_sun_au=d_sun_au,
+        )
+    else:
+        _, result, profile = run_powerlaw_iso_batch_native_profiled(
+            libname,
+            batch,
+            backend=backend,
+            precision=precision,
+            npoints=npoints,
+            q_on=q_on,
+            include_postprocess=True,
+        )
+        _set_batch_result_postprocess_metadata(result, decision["path_name"], decision["reason"])
+        _set_profile_postprocess_metadata(profile, decision["path_name"], decision["reason"])
+
+    if debug:
+        _emit_native_rl_debug("run_powerlaw_iso_batch_wrapper_profiled", result.postprocess_path, result.postprocess_reason)
+    return result, profile
 
 
 def local_jk_to_single_voxel_rl(batch, kernel_result, *, d_sun_au=1.0):
