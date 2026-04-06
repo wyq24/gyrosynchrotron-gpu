@@ -20,6 +20,19 @@ Frozen baseline status:
 - CUDA `FP32` is finite after narrow stability fixes, but it is still evaluation-only and not accepted yet
 - the legacy-compatible single-call CPU Python wrapper path remains intact
 
+Paused FP32 branch status:
+
+- the catastrophic FP32 failure classes were successfully diagnosed and removed:
+  - invalid-wave sentinel conversion issue
+  - one dangerous normalization expression for `norm_a`
+- the remaining FP32 error source is the corrected-root path:
+  - `FindMu0`
+  - `H1`
+  - corrected `mu0`
+  - `lnq2`
+- a local selective mixed-precision attempt in that corrected-root path regressed badly and was reverted
+- further FP32 work would require broader mixed precision and is not the current priority
+
 ## What Has Been Implemented
 
 ### Phase 1 Python Tooling
@@ -149,7 +162,7 @@ Observed CUDA `FP64` validation maxima after the O-mode fix:
 
 - `FP32` has not been accepted yet as an optional mode.
 - No follow-up fused native `RL`/postprocessing path has been validated yet.
-- No additional selective mixed-precision follow-up has been validated yet.
+- No broader mixed-precision follow-up has been validated yet.
 - End-to-end validation against the external `pygsfit` wrapper on the new native batch path has not been done.
 
 ## What Remains Out Of Scope
@@ -170,8 +183,8 @@ Observed CUDA `FP64` validation maxima after the O-mode fix:
 
 From the frozen baseline, start only one additive optimization branch at a time:
 
-- either reduce the wrapper/backend gap with a fused native `RL`/postprocessing batch path
-- or continue the narrow `FP32` stabilization effort on the same supported path
+- reduce the wrapper/backend gap with a fused native `RL`/postprocessing batch path
+- keep the paused `FP32` branch as diagnostic evidence only unless priorities change later
 
 Do not broaden scope beyond the current supported narrow path while doing this, and keep CUDA `FP64` plus the CPU reference as the correctness anchors.
 
