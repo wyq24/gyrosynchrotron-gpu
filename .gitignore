@@ -5,4 +5,13 @@ source/*.o
 source/MWTransferArr.so
 source/MWTransferArr.buildinfo
 examples/__pycache__/
+tools/__pycache__/
+mcmc_example/__pycache__/
+.codex
 .codex/
+.idea/
+binaries/MWTransferArr_cpu_only_linux_x86_64.so
+binaries/MWTransferArr_cpu_only_linux_x86_64.buildinfo
+binaries/MWTransferArr_cuda_linux_x86_64.so
+binaries/MWTransferArr_cuda_linux_x86_64.buildinfo
+/numpyro_ess_migration_skeleton.py

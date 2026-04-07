@@ -45,7 +45,7 @@ Paused FP32 branch status:
   - `tools/phase1_benchmark.py`
   - `tools/phase1_profile.py`
 - Added documentation:
-  - `doc/Phase1GPU.md`
+  - `doc/internal/development/Phase1GPU.md`
 
 ### Native Batch Interface
 

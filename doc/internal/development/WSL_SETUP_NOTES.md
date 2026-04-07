@@ -119,7 +119,7 @@ Observed CUDA `FP64` result summary:
 
 ## Immediate Sanity Checks For The New Session
 
-- Confirm `AGENTS.md`, `Handoff.md`, `PLANS.md`, and `WSL_SETUP_NOTES.md` are present at repo root.
+- Confirm `AGENTS.md`, `doc/internal/development/Handoff.md`, `doc/internal/development/PLANS.md`, and `doc/internal/development/WSL_SETUP_NOTES.md` are present.
 - Confirm the narrow native batch files exist:
   - `source/ApproxBatch.h`
   - `source/ApproxBatch.cpp`

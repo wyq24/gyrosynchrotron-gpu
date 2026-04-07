@@ -3,7 +3,7 @@
 This file is a non-functional interface sketch.  It exists to:
   1. Freeze the proposed JAX-facing function signature before engineering begins.
   2. Show exactly where the ctypes → XLA FFI boundary replacement happens.
-  3. Serve as the starting point for M1 (see doc/JAXVectorizedForwardFeasibility.md).
+  3. Serve as the starting point for M1 (see doc/internal/development/JAXVectorizedForwardFeasibility.md).
 
 DO NOT import this in production code.
 DO NOT modify any existing files based on this stub.
@@ -38,7 +38,7 @@ from __future__ import annotations
 
 # ---------------------------------------------------------------------------
 # Placeholder: replace with real XLA FFI registration once MWTransferArrXLA.so
-# is built.  See doc/JAXVectorizedForwardFeasibility.md § M1.
+# is built.  See doc/internal/development/JAXVectorizedForwardFeasibility.md § M1.
 # ---------------------------------------------------------------------------
 
 _FFI_REGISTERED = False  # set True after plugin load in M1
@@ -81,7 +81,7 @@ def mw_approx_batch_rl_jax(
     if not _FFI_REGISTERED:
         raise NotImplementedError(
             "The XLA FFI plugin has not been built yet.\n"
-            "See doc/JAXVectorizedForwardFeasibility.md for the M1 implementation plan.\n"
+            "See doc/internal/development/JAXVectorizedForwardFeasibility.md for the M1 implementation plan.\n"
             "The validated ctypes path (examples/GScodes.py) remains the production interface."
         )
     # --- M1 implementation outline (not code) ---
