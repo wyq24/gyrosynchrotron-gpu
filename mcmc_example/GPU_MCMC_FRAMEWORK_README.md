@@ -11,7 +11,7 @@ This package-level backend is the current additive MCMC path for the validated n
 
 For the full usage guide, differences from the legacy path, and calling examples, see:
 
-- `doc/GpuBatchedMCMC.md`
+- `doc/public/GpuBatchedMCMC.md`
 
 ## Quick start
 

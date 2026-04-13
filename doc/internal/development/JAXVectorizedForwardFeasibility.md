@@ -17,11 +17,11 @@ Files read during this assessment:
 | `mcmc_backend_gpu_batched.py` | Current sampler architecture: emcee + `vectorize=True` over batched GPU backend |
 | `spec_utils.py` | Unit conversions, parameter ordering, single-voxel RL reduction |
 | `npec_helpers.py` | Normalizer and SBI model wrapper; observation processing pipeline |
-| `doc/CallingEfficiently.md` | Fast-path activation conditions; exact ctypes call sequence |
-| `doc/Phase1GPU.md` | Validation scope and correctness baseline |
-| `doc/OptFusedNativeRL.md` | Speedup numbers; fused RL path; Python RL postprocessing as prior bottleneck |
-| `doc/OptFP32Salvage.md` | FP32 status: paused, evaluation-only, not production-correct |
-| `doc/BuildLibraries.md` | Shared library exports; build system |
+| `doc/public/CallingFromPython.md` | Fast-path activation conditions; exact ctypes call sequence |
+| `doc/internal/development/Phase1GPU.md` | Validation scope and correctness baseline |
+| `doc/internal/development/OptFusedNativeRL.md` | Speedup numbers; fused RL path; Python RL postprocessing as prior bottleneck |
+| `doc/internal/development/OptFP32Salvage.md` | FP32 status: paused, evaluation-only, not production-correct |
+| `doc/public/BuildLibraries.md` | Shared library exports; build system |
 | `source/` (directory listing) | C++/CUDA source structure; physics modules |
 
 ---

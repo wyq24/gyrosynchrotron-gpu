@@ -11,6 +11,7 @@ MWApproxBatchTiming g_last_batch_timing{};
 constexpr double MW_BATCH_SOLAR_AU_CM = 1.495978707e13;
 constexpr double MW_BATCH_FLUX_SCALE = 1.0e-19;
 constexpr double MW_BATCH_TAU_EXP_LIMIT = 700.0;
+constexpr double MW_BATCH_LEGACY_ABSORPTION_SENTINEL = 1.0e100;
 
 int MWApproxBatchValidateCommon(const MWApproxBatchConfig *config, const MWApproxBatchInputs *inputs)
 {
@@ -45,6 +46,28 @@ size_t MWApproxBatchRlIndex(int nfreq, int row_index, int freq_index, int batch_
 {
  return static_cast<size_t>(row_index)
       + 7u * (static_cast<size_t>(freq_index) + static_cast<size_t>(nfreq) * static_cast<size_t>(batch_index));
+}
+
+int MWApproxBatchFiniteBits(double x)
+{
+ union { double f; unsigned long long u; } bits;
+ bits.f=x;
+ return (bits.u & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+}
+
+void MWApproxBatchSanitizeCudaFp32OMode(const MWApproxBatchConfig *config,
+                                        double *jo,
+                                        double *ko)
+{
+ if (config->backend != MW_BATCH_BACKEND_CUDA || config->precision != MW_BATCH_PRECISION_FP32) return;
+
+ const size_t kernel_size = static_cast<size_t>(config->nfreq) * static_cast<size_t>(config->batch_size);
+ for (size_t idx=0; idx<kernel_size; ++idx)
+ {
+  if (MWApproxBatchFiniteBits(jo[idx]) && MWApproxBatchFiniteBits(ko[idx])) continue;
+  jo[idx]=0.0;
+  ko[idx]=MW_BATCH_LEGACY_ABSORPTION_SENTINEL;
+ }
 }
 
 void MWApproxBatchConvertLocalToRl(const MWApproxBatchConfig *config,
@@ -167,12 +190,18 @@ int MWApproxBatchRun(const MWApproxBatchConfig *config, const MWApproxBatchInput
  switch (config->backend)
  {
   case MW_BATCH_BACKEND_CPU:
-   return MWApproxBatchRunCpu(config, inputs, outputs);
+   res=MWApproxBatchRunCpu(config, inputs, outputs);
+   break;
   case MW_BATCH_BACKEND_CUDA:
-   return MWApproxBatchRunCuda(config, inputs, outputs);
+   res=MWApproxBatchRunCuda(config, inputs, outputs);
+   break;
   default:
    return MW_BATCH_ERR_UNSUPPORTED_BACKEND;
  }
+
+ if (res) return res;
+ MWApproxBatchSanitizeCudaFp32OMode(config, outputs->jo, outputs->ko);
+ return MW_BATCH_OK;
 }
 
 int MWApproxBatchRunRL(const MWApproxBatchConfig *config, const MWApproxBatchInputs *inputs, const MWApproxBatchRlOutputs *outputs, double d_sun_au)
