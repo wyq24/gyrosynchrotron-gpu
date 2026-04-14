@@ -726,6 +726,37 @@ class SamplingConfig:
     moves: tuple[tuple[str, float], ...] = (("stretch", 0.8), ("desnooker", 0.2))
 
 
+@dataclass
+class JaxEssSamplingConfig:
+    num_chains: int = 16
+    num_warmup: int = 8
+    num_samples: int = 16
+    thinning: int = 1
+    noise_level: float = 0.1
+    max_steps: int = 128
+    max_iter: int = 128
+    init_mu: float = 2.0
+    tune_mu: bool = True
+    randomize_split: bool = True
+    progress_bar: bool = False
+    jax_device_platform: str = "gpu"
+    xla_lib_path: str = "source/MWTransferArrXLA.so"
+
+
+@dataclass
+class JaxAiesSamplingConfig:
+    num_chains: int = 16
+    num_warmup: int = 8
+    num_samples: int = 16
+    thinning: int = 1
+    noise_level: float = 0.1
+    randomize_split: bool = True
+    progress_bar: bool = False
+    moves: tuple[tuple[str, float], ...] = (("de", 1.0),)
+    jax_device_platform: str = "gpu"
+    xla_lib_path: str = "source/MWTransferArrXLA.so"
+
+
 
 def _build_emcee_moves(moves_spec: tuple[tuple[str, float], ...]):
     import emcee
@@ -803,6 +834,189 @@ def run_single_mcmc_gpu_batched(
     return np.asarray(normalizer.denormalize_params(flat_norm), dtype=np.float64)
 
 
+def run_single_mcmc_jax_ess_batched(
+    spectrum: np.ndarray,
+    vary_bounds: Sequence[tuple[float, float]],
+    vary_indices: Sequence[int],
+    fixed_params: Sequence[float],
+    x_log_bounds: tuple[float, float],
+    sampling_cfg: JaxEssSamplingConfig,
+    seed: int,
+    warm_samples_denorm: np.ndarray | None = None,
+    warm_start_cfg: WarmStartConfig | None = None,
+    target_freq_ghz: np.ndarray | None = None,
+    ess_runner=None,
+) -> np.ndarray:
+    """ESS posterior sampling for one spectrum using the staged JAX FFI path."""
+
+    from jax_ffi.jax_runtime import maybe_device_put, resolve_jax_device
+    from jax_ffi.numpyro_ess import (
+        ESSRunConfig,
+        JAXFfiLegacyObservableForwardModel,
+        JAXLogDensityConfig,
+        ReusableESSMcmcRunner,
+        run_ess_mcmc,
+    )
+
+    n_dim = len(vary_bounds)
+    if sampling_cfg.num_chains % 2 != 0:
+        raise ValueError(f"num_chains must be even, got {sampling_cfg.num_chains}")
+    if sampling_cfg.num_chains < 2 * n_dim:
+        raise ValueError(f"num_chains must be >= 2*D ({2*n_dim}), got {sampling_cfg.num_chains}")
+
+    warm_cfg = warm_start_cfg or WarmStartConfig()
+    rng = np.random.default_rng(seed)
+    normalizer = ParameterNormalizer(vary_bounds, x_log_bounds=x_log_bounds, target_range=(-5.0, 5.0))
+    init_params = _initialize_walkers(
+        rng=rng,
+        n_walkers=sampling_cfg.num_chains,
+        n_dim=n_dim,
+        warm_samples_denorm=warm_samples_denorm,
+        normalizer=normalizer,
+        cfg=warm_cfg,
+    )
+
+    jax_device = resolve_jax_device(sampling_cfg.jax_device_platform)
+    init_params = maybe_device_put(init_params, jax_device)
+    observation = np.asarray(spectrum, dtype=np.float64).reshape(-1)
+    fixed_params_arr = np.asarray(fixed_params, dtype=np.float64).reshape(-1)
+    if ess_runner is None:
+        cfg = JAXLogDensityConfig(
+            vary_bounds=vary_bounds,
+            vary_indices=vary_indices,
+            fixed_params=fixed_params_arr,
+            x_log_bounds=x_log_bounds,
+            observation=observation,
+            noise_level=sampling_cfg.noise_level,
+        )
+        forward_model = JAXFfiLegacyObservableForwardModel(
+            xla_lib_path=sampling_cfg.xla_lib_path,
+            target_freq_ghz=LEGACY_TARGET_FREQ_GHZ.copy() if target_freq_ghz is None else np.asarray(target_freq_ghz, dtype=np.float64),
+        )
+        result = run_ess_mcmc(
+            cfg,
+            forward_model,
+            run_cfg=ESSRunConfig(
+                num_warmup=sampling_cfg.num_warmup,
+                num_samples=sampling_cfg.num_samples,
+                num_chains=sampling_cfg.num_chains,
+                thinning=sampling_cfg.thinning,
+                progress_bar=sampling_cfg.progress_bar,
+                randomize_split=sampling_cfg.randomize_split,
+                max_steps=sampling_cfg.max_steps,
+                max_iter=sampling_cfg.max_iter,
+                init_mu=sampling_cfg.init_mu,
+                tune_mu=sampling_cfg.tune_mu,
+                seed=seed,
+            ),
+            init_params=init_params,
+        )
+    else:
+        if not isinstance(ess_runner, ReusableESSMcmcRunner):
+            raise TypeError("ess_runner must be a ReusableESSMcmcRunner instance")
+        result = ess_runner.run(
+            observation=maybe_device_put(observation, jax_device),
+            fixed_params=maybe_device_put(fixed_params_arr, jax_device),
+            init_params=init_params,
+            seed=seed,
+        )
+
+    samples = np.asarray(result.samples_denorm, dtype=np.float64).reshape(-1, n_dim)
+    if samples.shape[0] == 0:
+        raise RuntimeError("Empty JAX ESS chain after warmup/thinning. Increase num_samples or reduce thinning.")
+    return samples
+
+
+def run_single_mcmc_jax_aies_batched(
+    spectrum: np.ndarray,
+    vary_bounds: Sequence[tuple[float, float]],
+    vary_indices: Sequence[int],
+    fixed_params: Sequence[float],
+    x_log_bounds: tuple[float, float],
+    sampling_cfg: JaxAiesSamplingConfig,
+    seed: int,
+    warm_samples_denorm: np.ndarray | None = None,
+    warm_start_cfg: WarmStartConfig | None = None,
+    target_freq_ghz: np.ndarray | None = None,
+    aies_runner=None,
+) -> np.ndarray:
+    """AIES posterior sampling for one spectrum using the staged JAX FFI path."""
+
+    from jax_ffi.jax_runtime import maybe_device_put, resolve_jax_device
+    from jax_ffi.numpyro_ess import (
+        AIESRunConfig,
+        JAXFfiLegacyObservableForwardModel,
+        JAXLogDensityConfig,
+        ReusableAIESMcmcRunner,
+        run_aies_mcmc,
+    )
+
+    n_dim = len(vary_bounds)
+    if sampling_cfg.num_chains % 2 != 0:
+        raise ValueError(f"num_chains must be even, got {sampling_cfg.num_chains}")
+    if sampling_cfg.num_chains < 2 * n_dim:
+        raise ValueError(f"num_chains must be >= 2*D ({2*n_dim}), got {sampling_cfg.num_chains}")
+
+    warm_cfg = warm_start_cfg or WarmStartConfig()
+    rng = np.random.default_rng(seed)
+    normalizer = ParameterNormalizer(vary_bounds, x_log_bounds=x_log_bounds, target_range=(-5.0, 5.0))
+    init_params = _initialize_walkers(
+        rng=rng,
+        n_walkers=sampling_cfg.num_chains,
+        n_dim=n_dim,
+        warm_samples_denorm=warm_samples_denorm,
+        normalizer=normalizer,
+        cfg=warm_cfg,
+    )
+
+    jax_device = resolve_jax_device(sampling_cfg.jax_device_platform)
+    init_params = maybe_device_put(init_params, jax_device)
+    observation = np.asarray(spectrum, dtype=np.float64).reshape(-1)
+    fixed_params_arr = np.asarray(fixed_params, dtype=np.float64).reshape(-1)
+    if aies_runner is None:
+        cfg = JAXLogDensityConfig(
+            vary_bounds=vary_bounds,
+            vary_indices=vary_indices,
+            fixed_params=fixed_params_arr,
+            x_log_bounds=x_log_bounds,
+            observation=observation,
+            noise_level=sampling_cfg.noise_level,
+        )
+        forward_model = JAXFfiLegacyObservableForwardModel(
+            xla_lib_path=sampling_cfg.xla_lib_path,
+            target_freq_ghz=LEGACY_TARGET_FREQ_GHZ.copy() if target_freq_ghz is None else np.asarray(target_freq_ghz, dtype=np.float64),
+        )
+        result = run_aies_mcmc(
+            cfg,
+            forward_model,
+            run_cfg=AIESRunConfig(
+                num_warmup=sampling_cfg.num_warmup,
+                num_samples=sampling_cfg.num_samples,
+                num_chains=sampling_cfg.num_chains,
+                thinning=sampling_cfg.thinning,
+                progress_bar=sampling_cfg.progress_bar,
+                randomize_split=sampling_cfg.randomize_split,
+                moves=sampling_cfg.moves,
+                seed=seed,
+            ),
+            init_params=init_params,
+        )
+    else:
+        if not isinstance(aies_runner, ReusableAIESMcmcRunner):
+            raise TypeError("aies_runner must be a ReusableAIESMcmcRunner instance")
+        result = aies_runner.run(
+            observation=maybe_device_put(observation, jax_device),
+            fixed_params=maybe_device_put(fixed_params_arr, jax_device),
+            init_params=init_params,
+            seed=seed,
+        )
+
+    samples = np.asarray(result.samples_denorm, dtype=np.float64).reshape(-1, n_dim)
+    if samples.shape[0] == 0:
+        raise RuntimeError("Empty JAX AIES chain after warmup/thinning. Increase num_samples or reduce thinning.")
+    return samples
+
+
 # -----------------------------------------------------------------------------
 # Cube / node fitting with resume support and neighbor reuse
 # -----------------------------------------------------------------------------
@@ -811,6 +1025,24 @@ def run_single_mcmc_gpu_batched(
 @dataclass
 class CubeSamplingConfig:
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    warm_start: WarmStartConfig = field(default_factory=WarmStartConfig)
+    checkpoint_every: int = 10
+    max_nodes: int | None = None
+    save_samples: bool = True
+
+
+@dataclass
+class CubeJaxEssConfig:
+    sampling: JaxEssSamplingConfig = field(default_factory=JaxEssSamplingConfig)
+    warm_start: WarmStartConfig = field(default_factory=WarmStartConfig)
+    checkpoint_every: int = 10
+    max_nodes: int | None = None
+    save_samples: bool = True
+
+
+@dataclass
+class CubeJaxAiesConfig:
+    sampling: JaxAiesSamplingConfig = field(default_factory=JaxAiesSamplingConfig)
     warm_start: WarmStartConfig = field(default_factory=WarmStartConfig)
     checkpoint_every: int = 10
     max_nodes: int | None = None
@@ -948,6 +1180,340 @@ def fit_cube_mcmc_resumable_gpu(
                 "exploration_fraction": float(cube_cfg.warm_start.exploration_fraction),
                 "max_neighbor_samples": int(cube_cfg.warm_start.max_neighbor_samples),
                 "broad_init_scale": float(cube_cfg.warm_start.broad_init_scale),
+            },
+        },
+    )
+
+
+def fit_cube_mcmc_resumable_jax_ess(
+    cube: np.ndarray,
+    all_param_bounds: list[tuple[float, float]],
+    vary_indices: list[int],
+    fixed_params: list[float],
+    x_log_bounds: tuple[float, float],
+    segmentation: str,
+    block_k: int,
+    valid_mask: np.ndarray | None,
+    out_dir: str,
+    resume_path: str,
+    cube_cfg: CubeJaxEssConfig,
+    seed: int,
+) -> MCMCFitResult:
+    """Additive cube-fit entry point that uses the staged JAX ESS sampler."""
+
+    from jax_ffi.numpyro_ess import (
+        ESSRunConfig,
+        JAXFfiLegacyObservableForwardModel,
+        JAXLogDensityConfig,
+        ReusableESSMcmcRunner,
+    )
+
+    cube_arr = np.asarray(cube, dtype=np.float64)
+    if cube_arr.ndim != 3:
+        raise ValueError(f"cube must be [H,W,F], got {cube_arr.shape}")
+
+    h, w, _ = cube_arr.shape
+    if segmentation == "pixel":
+        seg = make_pixel_segmentation(h, w)
+    elif segmentation == "block":
+        seg = make_block_segmentation(h, w, block_k)
+    else:
+        raise ValueError(f"Unknown segmentation: {segmentation}")
+
+    vary_bounds = [all_param_bounds[i] for i in vary_indices]
+    d = len(vary_bounds)
+
+    node_spectra = _extract_node_spectra(cube_arr, seg, valid_mask=valid_mask)
+    out_root = Path(out_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    resume = Path(resume_path)
+    samples_dir = out_root / "mcmc_posteriors"
+    if cube_cfg.save_samples:
+        samples_dir.mkdir(parents=True, exist_ok=True)
+
+    node_thetas, q16_nodes, q84_nodes, done_nodes = _load_resume(resume, seg.n_nodes, d)
+
+    processed = 0
+    sampled = 0
+    sample_bank: dict[int, np.ndarray] = {}
+    ess_runner = ReusableESSMcmcRunner(
+        JAXLogDensityConfig(
+            vary_bounds=vary_bounds,
+            vary_indices=vary_indices,
+            fixed_params=np.asarray(fixed_params, dtype=np.float64).reshape(-1),
+            x_log_bounds=x_log_bounds,
+            observation=np.zeros((cube_arr.shape[-1],), dtype=np.float64),
+            noise_level=cube_cfg.sampling.noise_level,
+        ),
+        JAXFfiLegacyObservableForwardModel(
+            xla_lib_path=cube_cfg.sampling.xla_lib_path,
+            target_freq_ghz=LEGACY_TARGET_FREQ_GHZ.copy(),
+        ),
+        run_cfg=ESSRunConfig(
+            num_warmup=cube_cfg.sampling.num_warmup,
+            num_samples=cube_cfg.sampling.num_samples,
+            num_chains=cube_cfg.sampling.num_chains,
+            thinning=cube_cfg.sampling.thinning,
+            progress_bar=cube_cfg.sampling.progress_bar,
+            randomize_split=cube_cfg.sampling.randomize_split,
+            max_steps=cube_cfg.sampling.max_steps,
+            max_iter=cube_cfg.sampling.max_iter,
+            init_mu=cube_cfg.sampling.init_mu,
+            tune_mu=cube_cfg.sampling.tune_mu,
+        ),
+    )
+
+    for n in range(seg.n_nodes):
+        if done_nodes[n]:
+            continue
+        if cube_cfg.max_nodes is not None and sampled >= cube_cfg.max_nodes:
+            break
+
+        spectra = node_spectra[n]
+        if spectra.shape[0] == 0:
+            done_nodes[n] = True
+            processed += 1
+            if processed % cube_cfg.checkpoint_every == 0:
+                _save_resume(resume, node_thetas, q16_nodes, q84_nodes, done_nodes)
+            continue
+
+        node_spec = np.nanmedian(spectra, axis=0)
+        warm_samples = None
+        if cube_cfg.warm_start.use_neighbor_samples:
+            warm_samples = _gather_neighbor_samples(
+                node_index=n,
+                segmentation=segmentation,
+                image_hw=(h, w),
+                sample_bank=sample_bank,
+                max_neighbor_samples=cube_cfg.warm_start.max_neighbor_samples,
+            )
+
+        samples = run_single_mcmc_jax_ess_batched(
+            spectrum=node_spec,
+            vary_bounds=vary_bounds,
+            vary_indices=vary_indices,
+            fixed_params=fixed_params,
+            x_log_bounds=x_log_bounds,
+            sampling_cfg=cube_cfg.sampling,
+            seed=seed + n,
+            warm_samples_denorm=warm_samples,
+            warm_start_cfg=cube_cfg.warm_start,
+            ess_runner=ess_runner,
+        )
+
+        node_thetas[n] = np.median(samples, axis=0)
+        q16_nodes[n] = np.quantile(samples, 0.16, axis=0)
+        q84_nodes[n] = np.quantile(samples, 0.84, axis=0)
+        sample_bank[n] = samples
+
+        if cube_cfg.save_samples:
+            np.save(samples_dir / f"node_{n:06d}.npy", samples)
+
+        done_nodes[n] = True
+        sampled += 1
+        processed += 1
+        if processed % cube_cfg.checkpoint_every == 0:
+            _save_resume(resume, node_thetas, q16_nodes, q84_nodes, done_nodes)
+
+    _save_resume(resume, node_thetas, q16_nodes, q84_nodes, done_nodes)
+
+    theta_map = node_theta_to_pixel_map(seg, node_thetas)
+    q16_map = node_theta_to_pixel_map(seg, q16_nodes)
+    q84_map = node_theta_to_pixel_map(seg, q84_nodes)
+
+    return MCMCFitResult(
+        theta_map=theta_map,
+        q16_map=q16_map,
+        q84_map=q84_map,
+        node_thetas=node_thetas,
+        q16_nodes=q16_nodes,
+        q84_nodes=q84_nodes,
+        seg=seg,
+        done_nodes=done_nodes,
+        debug={
+            "resume_path": str(resume),
+            "processed_nodes": int(processed),
+            "sampled_nodes": int(sampled),
+            "save_samples": bool(cube_cfg.save_samples),
+            "sampler": "jax_ess",
+            "sampling": {
+                "runner_reused_across_nodes": True,
+                "num_chains": int(cube_cfg.sampling.num_chains),
+                "num_warmup": int(cube_cfg.sampling.num_warmup),
+                "num_samples": int(cube_cfg.sampling.num_samples),
+                "thinning": int(cube_cfg.sampling.thinning),
+                "noise_level": float(cube_cfg.sampling.noise_level),
+                "max_steps": int(cube_cfg.sampling.max_steps),
+                "max_iter": int(cube_cfg.sampling.max_iter),
+                "init_mu": float(cube_cfg.sampling.init_mu),
+                "tune_mu": bool(cube_cfg.sampling.tune_mu),
+                "randomize_split": bool(cube_cfg.sampling.randomize_split),
+                "jax_device_platform": str(cube_cfg.sampling.jax_device_platform),
+                "xla_lib_path": str(cube_cfg.sampling.xla_lib_path),
+            },
+        },
+    )
+
+
+def fit_cube_mcmc_resumable_jax_aies(
+    cube: np.ndarray,
+    all_param_bounds: list[tuple[float, float]],
+    vary_indices: list[int],
+    fixed_params: list[float],
+    x_log_bounds: tuple[float, float],
+    segmentation: str,
+    block_k: int,
+    valid_mask: np.ndarray | None,
+    out_dir: str,
+    resume_path: str,
+    cube_cfg: CubeJaxAiesConfig,
+    seed: int,
+) -> MCMCFitResult:
+    """Additive cube-fit entry point that uses the staged JAX AIES sampler."""
+
+    from jax_ffi.numpyro_ess import (
+        AIESRunConfig,
+        JAXFfiLegacyObservableForwardModel,
+        JAXLogDensityConfig,
+        ReusableAIESMcmcRunner,
+    )
+
+    cube_arr = np.asarray(cube, dtype=np.float64)
+    if cube_arr.ndim != 3:
+        raise ValueError(f"cube must be [H,W,F], got {cube_arr.shape}")
+
+    h, w, _ = cube_arr.shape
+    if segmentation == "pixel":
+        seg = make_pixel_segmentation(h, w)
+    elif segmentation == "block":
+        seg = make_block_segmentation(h, w, block_k)
+    else:
+        raise ValueError(f"Unknown segmentation: {segmentation}")
+
+    vary_bounds = [all_param_bounds[i] for i in vary_indices]
+    d = len(vary_bounds)
+
+    node_spectra = _extract_node_spectra(cube_arr, seg, valid_mask=valid_mask)
+    out_root = Path(out_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    resume = Path(resume_path)
+    samples_dir = out_root / "mcmc_posteriors"
+    if cube_cfg.save_samples:
+        samples_dir.mkdir(parents=True, exist_ok=True)
+
+    node_thetas, q16_nodes, q84_nodes, done_nodes = _load_resume(resume, seg.n_nodes, d)
+
+    processed = 0
+    sampled = 0
+    sample_bank: dict[int, np.ndarray] = {}
+    aies_runner = ReusableAIESMcmcRunner(
+        JAXLogDensityConfig(
+            vary_bounds=vary_bounds,
+            vary_indices=vary_indices,
+            fixed_params=np.asarray(fixed_params, dtype=np.float64).reshape(-1),
+            x_log_bounds=x_log_bounds,
+            observation=np.zeros((cube_arr.shape[-1],), dtype=np.float64),
+            noise_level=cube_cfg.sampling.noise_level,
+        ),
+        JAXFfiLegacyObservableForwardModel(
+            xla_lib_path=cube_cfg.sampling.xla_lib_path,
+            target_freq_ghz=LEGACY_TARGET_FREQ_GHZ.copy(),
+        ),
+        run_cfg=AIESRunConfig(
+            num_warmup=cube_cfg.sampling.num_warmup,
+            num_samples=cube_cfg.sampling.num_samples,
+            num_chains=cube_cfg.sampling.num_chains,
+            thinning=cube_cfg.sampling.thinning,
+            progress_bar=cube_cfg.sampling.progress_bar,
+            randomize_split=cube_cfg.sampling.randomize_split,
+            moves=cube_cfg.sampling.moves,
+        ),
+    )
+
+    for n in range(seg.n_nodes):
+        if done_nodes[n]:
+            continue
+        if cube_cfg.max_nodes is not None and sampled >= cube_cfg.max_nodes:
+            break
+
+        spectra = node_spectra[n]
+        if spectra.shape[0] == 0:
+            done_nodes[n] = True
+            processed += 1
+            if processed % cube_cfg.checkpoint_every == 0:
+                _save_resume(resume, node_thetas, q16_nodes, q84_nodes, done_nodes)
+            continue
+
+        node_spec = np.nanmedian(spectra, axis=0)
+        warm_samples = None
+        if cube_cfg.warm_start.use_neighbor_samples:
+            warm_samples = _gather_neighbor_samples(
+                node_index=n,
+                segmentation=segmentation,
+                image_hw=(h, w),
+                sample_bank=sample_bank,
+                max_neighbor_samples=cube_cfg.warm_start.max_neighbor_samples,
+            )
+
+        samples = run_single_mcmc_jax_aies_batched(
+            spectrum=node_spec,
+            vary_bounds=vary_bounds,
+            vary_indices=vary_indices,
+            fixed_params=fixed_params,
+            x_log_bounds=x_log_bounds,
+            sampling_cfg=cube_cfg.sampling,
+            seed=seed + n,
+            warm_samples_denorm=warm_samples,
+            warm_start_cfg=cube_cfg.warm_start,
+            aies_runner=aies_runner,
+        )
+
+        node_thetas[n] = np.median(samples, axis=0)
+        q16_nodes[n] = np.quantile(samples, 0.16, axis=0)
+        q84_nodes[n] = np.quantile(samples, 0.84, axis=0)
+        sample_bank[n] = samples
+
+        if cube_cfg.save_samples:
+            np.save(samples_dir / f"node_{n:06d}.npy", samples)
+
+        done_nodes[n] = True
+        sampled += 1
+        processed += 1
+        if processed % cube_cfg.checkpoint_every == 0:
+            _save_resume(resume, node_thetas, q16_nodes, q84_nodes, done_nodes)
+
+    _save_resume(resume, node_thetas, q16_nodes, q84_nodes, done_nodes)
+
+    theta_map = node_theta_to_pixel_map(seg, node_thetas)
+    q16_map = node_theta_to_pixel_map(seg, q16_nodes)
+    q84_map = node_theta_to_pixel_map(seg, q84_nodes)
+
+    return MCMCFitResult(
+        theta_map=theta_map,
+        q16_map=q16_map,
+        q84_map=q84_map,
+        node_thetas=node_thetas,
+        q16_nodes=q16_nodes,
+        q84_nodes=q84_nodes,
+        seg=seg,
+        done_nodes=done_nodes,
+        debug={
+            "resume_path": str(resume),
+            "processed_nodes": int(processed),
+            "sampled_nodes": int(sampled),
+            "save_samples": bool(cube_cfg.save_samples),
+            "sampler": "jax_aies",
+            "sampling": {
+                "runner_reused_across_nodes": True,
+                "num_chains": int(cube_cfg.sampling.num_chains),
+                "num_warmup": int(cube_cfg.sampling.num_warmup),
+                "num_samples": int(cube_cfg.sampling.num_samples),
+                "thinning": int(cube_cfg.sampling.thinning),
+                "noise_level": float(cube_cfg.sampling.noise_level),
+                "randomize_split": bool(cube_cfg.sampling.randomize_split),
+                "moves": list(cube_cfg.sampling.moves),
+                "jax_device_platform": str(cube_cfg.sampling.jax_device_platform),
+                "xla_lib_path": str(cube_cfg.sampling.xla_lib_path),
             },
         },
     )

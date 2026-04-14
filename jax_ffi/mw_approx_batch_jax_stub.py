@@ -2,12 +2,13 @@
 
 This file is a non-functional interface sketch.  It exists to:
   1. Freeze the proposed JAX-facing function signature before engineering begins.
-  2. Show exactly where the ctypes → XLA FFI boundary replacement happens.
-  3. Serve as the starting point for M1 (see doc/internal/development/JAXVectorizedForwardFeasibility.md).
+  2. Show exactly where the current validated FP64 wrapper/backend boundary is replaced by a JAX FFI boundary.
+  3. Serve as the starting point for the FFI proof stage (see doc/internal/development/JAXVectorizedForwardFeasibility.md).
 
 DO NOT import this in production code.
 DO NOT modify any existing files based on this stub.
-The ctypes path (GScodes.py / MWTransferArr.so) is the authoritative validated path.
+The current validated FP64 supported path (today exercised through
+GScodes.py / MWTransferArr.so) is the authoritative reference.
 
 Parameter order in params[:, i]
 --------------------------------
@@ -38,10 +39,10 @@ from __future__ import annotations
 
 # ---------------------------------------------------------------------------
 # Placeholder: replace with real XLA FFI registration once MWTransferArrXLA.so
-# is built.  See doc/internal/development/JAXVectorizedForwardFeasibility.md § M1.
+# is built.  See doc/internal/development/JAXVectorizedForwardFeasibility.md § M2.
 # ---------------------------------------------------------------------------
 
-_FFI_REGISTERED = False  # set True after plugin load in M1
+_FFI_REGISTERED = False  # set True after plugin load in M2
 
 
 def _check_jax_x64() -> None:
@@ -70,7 +71,7 @@ def mw_approx_batch_rl_jax(
 ):
     """JAX-native forward call for the validated narrow GS batch path.
 
-    NOT yet implemented — this is a signature-only stub for M1.
+    NOT yet implemented — this is a signature-only stub for the M2 FFI proof.
 
     Returns
     -------
@@ -81,20 +82,23 @@ def mw_approx_batch_rl_jax(
     if not _FFI_REGISTERED:
         raise NotImplementedError(
             "The XLA FFI plugin has not been built yet.\n"
-            "See doc/internal/development/JAXVectorizedForwardFeasibility.md for the M1 implementation plan.\n"
-            "The validated ctypes path (examples/GScodes.py) remains the production interface."
+            "See doc/internal/development/JAXVectorizedForwardFeasibility.md for the M2 implementation plan.\n"
+            "The current validated FP64 supported path (examples/GScodes.py) remains the production interface."
         )
-    # --- M1 implementation outline (not code) ---
-    # 1. Load MWTransferArrXLA.so via jax.extend.ffi.load_plugin(plugin_path)
-    # 2. Call the registered custom-call target via jax.extend.ffi.ffi_call(
+    # --- M2 implementation outline (not code) ---
+    # 1. Load MWTransferArrXLA.so (or a tiny helper extension that exposes
+    #    PyCapsules) and register CPU/CUDA handlers with
+    #    jax.ffi.register_ffi_target(...)
+    # 2. Call the registered target via jax.ffi.ffi_call(
     #        "mw_approx_batch_rl",
     #        result_shape_dtypes=(
     #            jax.ShapeDtypeStruct((B, 7, nfreq), jnp.float64),   # rl
     #            jax.ShapeDtypeStruct((nfreq,), jnp.float64),        # freq_hz
     #        ),
+    #        vmap_method="broadcast_all",
     #        params,
     #        nfreq=nfreq, nu0_hz=nu0_hz, dlog10_nu=dlog10_nu,
     #        npoints=npoints, q_on=int(q_on), d_sun_au=d_sun_au,
     #    )
     # 3. Return (rl, freq_hz)
-    raise NotImplementedError  # remove once M1 is complete
+    raise NotImplementedError  # remove once M2 is complete

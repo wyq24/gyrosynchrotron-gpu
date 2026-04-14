@@ -4,6 +4,9 @@
 **Date:** 2026-04-05  
 **Target scope:** narrow validated path only — analytical PLW + ISO, Nz=1, approximate GS, FP64, batch interface
 
+Implementation status after the initial feasibility phase is tracked in
+`doc/JAXProgress_2026-04-14.md`.
+
 ---
 
 ## Evidence base
@@ -96,11 +99,11 @@ Path A is an **interoperability bridge, not a vectorized JAX path**. It is usefu
 
 ### What this requires
 
-JAX's current FFI mechanism (`jax.extend.ffi`, stabilized in JAX 0.4.28) allows C++/CUDA functions to be registered as XLA custom-call targets. Once registered:
+JAX's current public FFI mechanism (`jax.ffi`) allows C++/CUDA functions to be registered as XLA custom-call targets. Once registered:
 - The kernel is callable as a native JAX operation
 - JIT compilation works: XLA sees the call as a first-class graph node
 - Shape inference is handled by metadata registered at module import time
-- `vmap` can be layered on top (with manual batching rule or implicitly if batch dim is explicit)
+- `vmap` can be layered on top using `jax.ffi.ffi_call(..., vmap_method=...)`; for this repo, the batch ABI should use a non-sequential method so `vmap` does not degrade into a scan-like fallback
 - **Autodiff still requires a hand-written custom VJP rule** unless the physics is differentiable by construction; a numerical VJP via finite differences is always possible
 
 **What would need to change at the boundary:**
@@ -123,7 +126,7 @@ JAX's current FFI mechanism (`jax.extend.ffi`, stabilized in JAX 0.4.28) allows 
 | Add new build target to Makefile | 0.5 days |
 | Write Python `jax_ffi_wrapper.py` that loads plugin and declares shapes | 1 day |
 | Write a `jax.ShapeDtypeStruct` shape-inference rule | 0.5 days |
-| Validate M0: bit-exact output against ctypes path, single batch | 1 day |
+| Validate M0: output against the current validated FP64 supported-path oracle, single batch | 1 day |
 | Write custom VJP (optional, numerical finite-diff first) | 1 day |
 | Total | ~5–7 focused days |
 
@@ -131,9 +134,9 @@ This is a moderate engineering investment, not a rewrite.
 
 **Main blockers:**
 
-1. **JAX FFI API stability.** The `jax.extend.ffi` API stabilized in JAX 0.4.28 (late 2024). Older JAX versions require the undocumented `_custom_call` path. Pin JAX version ≥ 0.4.28 explicitly.
+1. **JAX FFI API stability.** Use the public `jax.ffi` API (`register_ffi_target`, `ffi_call`) when available. Older environments may require lower-level custom-call registration. Pin and validate a known-good JAX/jaxlib pair explicitly.
 
-2. **Two shared library artifacts.** The repo would have `MWTransferArr.so` (legacy ctypes path, currently validated) and a new `MWTransferArrXLA.so` (FFI plugin). This is normal for a phased migration; the ctypes path remains the validated reference until the FFI path is validated to numerical equivalence.
+2. **Two shared library artifacts.** The repo would have `MWTransferArr.so` (current validated path, exercised today through the Python wrapper) and a new `MWTransferArrXLA.so` (FFI plugin). This is normal for a phased migration; the validated FP64 supported path remains the reference until the FFI path is validated to numerical equivalence.
 
 3. **No CUDA device-pointer sharing with JAX device.** JAX manages its own CUDA memory pool (via `jaxlib`'s allocator). The XLA FFI buffers are allocated from this pool. The CUDA kernel receives raw `void*` device pointers from XLA. This is the standard pattern for XLA custom calls and is well-supported.
 
@@ -165,7 +168,7 @@ The approximate GS formula for the narrow validated path (PLW+ISO, Nz=1) is well
 - Be fully differentiable by construction via JAX's autodiff
 
 **What is preserved from current work:**
-- The FP64 ctypes path becomes the **validation oracle** for bit-level correctness checks
+- The current validated FP64 supported path becomes the **validation oracle**; today that oracle is exercised through the existing Python wrapper around `MWTransferArr.so`
 - The memory layout and parameter ordering established in `GScodes.py` directly inform the JAX function signature
 - The unit conversion logic in `spec_utils.py` is directly portable
 - The normalizer in `npec_helpers.py` is already pure numpy and trivially portable to JAX
@@ -176,7 +179,7 @@ The approximate GS formula for the narrow validated path (PLW+ISO, Nz=1) is well
 - The F-contiguous memory layout requirement
 
 **Honest assessment:**
-This is a **physics reimplementation project**, not a software integration project. The approximate GS path is not algorithmically complex (it is a table-lookup + integration scheme), but it requires careful numerical matching to the existing reference, especially for edge cases in the Bessel approximations and the corrected-root path. Expect 2–4 weeks for a competent implementation with full validation against the ctypes oracle. The FP32 failures documented in `OptFP32Salvage.md` (FindMu0, H1, lnq2 paths) suggest numerical subtleties that would need to be understood before reimplementation.
+This is a **physics reimplementation project**, not a software integration project. The approximate GS path is not algorithmically complex (it is a table-lookup + integration scheme), but it requires careful numerical matching to the existing reference, especially for edge cases in the Bessel approximations and the corrected-root path. Expect 2–4 weeks for a competent implementation with full validation against the current validated FP64 supported-path oracle. The FP32 failures documented in `OptFP32Salvage.md` (FindMu0, H1, lnq2 paths) suggest numerical subtleties that would need to be understood before reimplementation.
 
 **Verdict on Path C:**  
 Path C is the **cleanest long-term outcome** (fully differentiable, XLA-compiled, no external dependencies), but it is a new forward-model project that happens to have an excellent validation oracle. It is not a JAX migration — it is a JAX reimplementation. The existing GPU work contributes significantly as a correctness reference, but the compute investment (CUDA kernels) is not reused.
@@ -202,11 +205,11 @@ However, Path D **is** the right conclusion for the current near-term operationa
 
 1. **Now (M0–M1):** Pursue Path B (XLA FFI wrapper). This is moderate engineering effort, preserves all validated physics, and delivers a real JIT-able forward call for JAX-based samplers. It unblocks the `numpyro_ess_migration_skeleton.py` interface.
 
-2. **Later (when sampler needs gradients):** Pursue Path C incrementally. The FFI wrapper validates the interface contract and provides a correctness oracle. The pure JAX reimplementation targets autodiff for NUTS/HMC.
+2. **Later (when sampler needs gradients):** Pursue Path C incrementally. The FFI wrapper validates the interface contract and is checked against the supported-path FP64 oracle. The pure JAX reimplementation targets autodiff for NUTS/HMC.
 
 3. **Interim (if needed quickly):** Path A (`pure_callback`) can be used for ESS-style sampling without blocking on FFI engineering. It is not the end state.
 
-**Current GPU work is preserved in all cases.** The ctypes path remains the operational backend and the validation oracle throughout.
+**Current GPU work is preserved in all cases.** The validated FP64 supported path remains the operational backend and validation oracle throughout.
 
 ---
 
@@ -216,7 +219,7 @@ However, Path D **is** the right conclusion for the current near-term operationa
 |--------|-----------|
 | Recommended first path | **B (XLA FFI)** |
 | Confidence | **High** — the batch interface already has the right shape semantics; the CUDA physics code does not need to change |
-| Preserves existing GPU work | **Yes** — physics code unchanged; ctypes path remains validated reference |
+| Preserves existing GPU work | **Yes** — physics code unchanged; the validated FP64 supported path remains the reference |
 | Engineering effort for M1 proof-of-concept | **~5–7 days** of focused boundary work |
 | Main technical risk | JAX FFI API version pinning; XLA buffer ownership semantics |
 | Blocker for NUTS/HMC | Requires custom VJP (numerical finite-diff viable as first pass) |
@@ -284,30 +287,36 @@ Notes:
 - The output layout is transposed to `[B, 7, F]` (C-contiguous in batch dimension) from the existing F-contiguous `[7, F, B]` to match JAX's default C-contiguous semantics. The transposition is absorbed into the XLA layout descriptor at registration time.
 - `nfreq`, `npoints`, `q_on` are compile-time-static for a given JIT compilation.
 - FP64 requires `jax.config.update("jax_enable_x64", True)` in the calling code.
+- This low-level contract is the raw RL layer. A separate adapter must still reproduce the current fitting observable exactly: `I_L + I_R`, interpolation onto the legacy frequency grid, and brightness-temperature conversion where the current likelihood expects `Tb`.
+- In addition to the canonical 10D physical input above, the JAX layer must provide an explicit legacy-8D compatibility helper that preserves the current semantics `area_asec2 = 1.625625` and `Emax_MeV = 10.0`.
 
 ---
 
 ## Engineering milestones
 
-### M0: Boundary audit and memory-layout audit
-**Deliverable:** Written record of exact buffer sizes, alignment requirements, and F-contiguous output indexing in the current ctypes path. Confirm XLA FFI buffer API can satisfy the same layout contract.  
-**Acceptance:** Can explain exactly what `PythonInterface.cpp` does at the pointer level; no surprises in M1.
+### M0: Boundary audit, oracle definition, and validation-baseline capture
+**Deliverable:** Written record of exact buffer sizes, alignment requirements, F-contiguous output indexing, supported fast-path conditions, and the exact definition of the current validated FP64 supported-path oracle. Capture the repo's current real-sweep and stress-sweep validation thresholds for that oracle.
+**Acceptance:** Can explain exactly what `PythonInterface.cpp` does at the pointer level, what the fused RL path returns, and what numerical thresholds the supported FP64 path already meets.
 
-### M1: Minimal XLA FFI proof-of-concept for one batch
-**Deliverable:** `source/XLAInterface.cpp` + updated `Makefile` producing `MWTransferArrXLA.so`. Python loader `jax_ffi/mw_approx_batch_jax.py` wrapping the plugin. Single-batch test showing bit-exact output against the ctypes reference path at `batch_size=8, nfreq=100`.  
-**Acceptance:** `allclose(result_ffi, result_ctypes, rtol=1e-12)` passes.
+### M1: Observable adapter and parameter-contract freeze
+**Deliverable:** Freeze two JAX-facing contracts: a canonical 10D physical-parameter contract and an explicit legacy-8D compatibility helper preserving `area_asec2 = 1.625625` and `Emax_MeV = 10.0`. Define the mandatory observable adapter that reproduces the current fitting observable exactly: `I_L + I_R`, interpolation to the legacy frequency grid, and `Tb` conversion where expected.
+**Acceptance:** Python-side comparison against the current batched backend passes for both the canonical 10D and legacy 8D inputs on representative cases, and the final `Tb` observable matches the supported-path FP64 oracle.
 
-### M2: Vectorized batch proof and correctness validation
-**Deliverable:** M1 extended to `batch_size=512`. Correctness validation at multiple batch sizes. `jax.jit` compilation verified. Optional: `vmap` over the batch dimension verified. Timing comparison against ctypes path.  
-**Acceptance:** Correctness: same tolerance as M1. Throughput: no worse than 2x the ctypes path for `batch_size=512`.
+### M2: Minimal XLA FFI proof-of-concept for one batch
+**Deliverable:** `source/XLAInterface.cpp` + updated `Makefile` producing `MWTransferArrXLA.so`. Python loader `jax_ffi/mw_approx_batch_jax.py` registering targets through `jax.ffi.register_ffi_target(...)` and calling them with `jax.ffi.ffi_call(...)` using explicit layouts. Single-batch proof on the supported path at `batch_size=8, nfreq=100`.
+**Acceptance:** `status` and `freq_hz` match exactly. Raw RL outputs and the final observable meet or beat the current supported-path FP64 validation thresholds on the representative batch. Do not impose a single universal tolerance before the first FFI proof exists.
 
-### M3: Sampler integration trial with NumPyro ESS
-**Deliverable:** Wire the FFI wrapper into `numpyro_ess_migration_skeleton.py` by implementing `TODOJAXForwardModel.simulate_batch_jax`. Run a toy single-pixel ESS trial. Compare posterior to the emcee reference posterior.  
-**Acceptance:** ESS posterior is statistically consistent with emcee posterior on a test case.
+### M3: Vectorized batch proof and supported-workload validation
+**Deliverable:** Extend M2 across `batch_size = 1, 8, 32, 128, 512`. Verify `jax.jit` and `vmap` behavior using a non-sequential batching strategy (`broadcast_all` or another explicit batched rule that matches the ABI). Run the supported validation workloads (`real-sweep`, `stress-sweep`) against the current FP64 oracle.
+**Acceptance:** The JAX FFI path meets the current supported-path FP64 validation gates across the supported workloads and batch sizes. Warm steady-state throughput is evaluated primarily at meaningful batch sizes (`B >= 8`); `B = 1` may be slower due to JIT/startup overhead without failing the project.
 
-### M4: Performance evaluation and go/no-go for NUTS
-**Deliverable:** Measure ESS/second for the JAX path vs emcee batched GPU path. Assess whether NUTS is worth the custom VJP investment.  
-**Acceptance:** Go/no-go decision with quantitative justification.
+### M4: Sampler integration trial with NumPyro ESS
+**Deliverable:** Wire the FFI wrapper into `numpyro_ess_migration_skeleton.py` by implementing `TODOJAXForwardModel.simulate_batch_jax`. Run a toy single-pixel ESS trial using the same observable definition as the current exact MCMC backend.
+**Acceptance:** The JAX path matches the current likelihood on fixed parameter points, and the ESS posterior is statistically consistent with the current `emcee` batched backend on a test case.
+
+### M5: Performance evaluation and go/no-go for NUTS
+**Deliverable:** Measure cold compile cost, warm steady-state ESS throughput, and end-to-end sampling efficiency relative to the current GPU batched backend. Decide whether custom VJP work or a pure JAX rewrite is justified.
+**Acceptance:** Go/no-go decision with quantitative justification; proceed to NUTS/HMC only if the project actually needs gradients and the expected payoff is material.
 
 ---
 
@@ -318,8 +327,11 @@ Notes:
 | JAX FFI API instability | Medium | Pin JAX ≥ 0.4.28; test against 0.4.30+ |
 | XLA buffer ownership conflict with CUDA allocator | Medium | Standard pattern; mitigated by using XLA-provided device pointers |
 | F-contiguous ↔ C-contiguous layout mismatch | Low | Handled via XLA layout annotation or cheap transpose |
+| Observable mismatch vs current likelihood | High | The JAX path must match the final `Tb` spectrum used in fitting, not just raw RL arrays |
+| Legacy 8D vs canonical 10D semantics drift | Medium | Preserve the fixed `area_asec2` and `Emax_MeV` helper exactly for compatibility |
 | FP64 on CUDA (XLA side) | Low | XLA F64 on CUDA is supported; already validated in ctypes path |
 | Batch size must be static at JIT time | Medium | Requires recompilation for different batch sizes; use `jit` cache keyed on shape |
+| Sequential `vmap` fallback | Medium | Avoid `vmap_method="sequential"` for the explicit batch ABI; prefer a non-sequential batching strategy |
 | No autodiff without custom VJP | High (for NUTS) | Numerical finite-diff VJP is viable first pass; analytical VJP is a separate project |
 | Two build artifacts to maintain | Low | `MWTransferArr.so` (ctypes, validated) + `MWTransferArrXLA.so` (FFI) coexist peacefully |
 | emcee path disrupted | None | emcee path is independent; no changes required |
@@ -328,17 +340,18 @@ Notes:
 
 ## What should be done next
 
-**Immediate (before starting M0):**  
-- Confirm JAX version requirements with the compute environment  
-- Check whether `jax.extend.ffi` is available or whether the older `jax.lib.xla_client.register_custom_call_target` path is needed  
+**Immediate (before starting M0):**
+- Confirm JAX version requirements with the compute environment
+- Confirm that the environment supports the public `jax.ffi` path (`register_ffi_target`, `ffi_call`) and record any fallback needed for older environments
 - Read `source/PythonInterface.cpp` and `source/ApproxBatch.h` to understand the exact pointer conventions used in the CUDA kernel dispatch
+- Capture the supported-path FP64 oracle thresholds and the exact final observable definition used by the current fitting path
 
-**Short term (M0–M1):**  
-- Write the XLA interface boundary as described above  
-- Keep the ctypes path entirely untouched  
-- Validate bit-exact output before proceeding
+**Short term (M0–M1):**
+- Write the XLA interface boundary as described above
+- Keep `MWTransferArr.so`, `GScodes.py`, and the current batched backend untouched as the supported-path oracle
+- Validate both raw RL and final `Tb` observable behavior before proceeding
 
-**Do not start:**  
+**Do not start:**
 - A broad rewrite of the physics  
 - Any changes to `MWTransferArr.so`, `GScodes.py`, or `mcmc_backend_gpu_batched.py`  
 - FP32 investigation (remains paused per `OptFP32Salvage.md`)  
@@ -350,8 +363,8 @@ Notes:
 
 | Question | Answer |
 |----------|--------|
-| Is the current GPU forward work preserved? | **Yes** — the ctypes path is untouched in all viable paths |
+| Is the current GPU forward work preserved? | **Yes** — the current validated FP64 supported path stays intact in all viable paths |
 | Is a real JAX-vectorized future technically worthwhile? | **Yes** — Path B (XLA FFI) is feasible with ~5–7 days of focused boundary work |
 | What is the most realistic JAX path? | **Path B first, Path C later when autodiff is needed** |
 | Does Path A count as a real JAX path? | **No** — it is an interop bridge; useful interim, not the migration target |
-| What should be done next? | Read `PythonInterface.cpp`, confirm JAX version, begin M0 boundary audit |
+| What should be done next? | Confirm `jax.ffi`, freeze the observable and parameter contract, and begin the M0 boundary/oracle audit |

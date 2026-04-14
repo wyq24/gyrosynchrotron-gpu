@@ -16,14 +16,20 @@ os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache-codex")
 
 from examples import GScodes
 from mcmc_example.mcmc_backend_gpu_batched import (
+    CubeJaxAiesConfig,
+    CubeJaxEssConfig,
     CubeSamplingConfig,
+    JaxAiesSamplingConfig,
+    JaxEssSamplingConfig,
     LEGACY_AREA_ASEC2,
     LEGACY_EMAX_MEV,
     LEGACY_TARGET_FREQ_GHZ,
     SamplingConfig,
     WarmStartConfig,
     build_legacy_8d_batched_backend,
+    fit_cube_mcmc_resumable_jax_aies,
     fit_cube_mcmc_resumable_gpu,
+    fit_cube_mcmc_resumable_jax_ess,
 )
 from mcmc_example.spec_utils import simulate_spectrum_optimized
 
@@ -141,8 +147,8 @@ def validate_spectra(lib_path: str, backend_name: str) -> None:
         raise RuntimeError("Validated single-call reference and new batched backend disagree beyond tolerance")
 
 
-def validate_tiny_cube(lib_path: str, backend_name: str) -> None:
-    if importlib.util.find_spec("emcee") is None:
+def validate_tiny_cube(lib_path: str, backend_name: str, sampler_name: str, xla_lib_path: str) -> None:
+    if sampler_name == "emcee" and importlib.util.find_spec("emcee") is None:
         raise RuntimeError("Cube mode requires the 'emcee' package to be installed in this environment")
 
     backend = build_legacy_8d_batched_backend(
@@ -152,45 +158,119 @@ def validate_tiny_cube(lib_path: str, backend_name: str) -> None:
     )
     cube = backend.simulate_batch(TEST_PARAMS_8D).reshape(2, 2, -1)
 
-    cube_cfg = CubeSamplingConfig(
-        sampling=SamplingConfig(
-            n_walkers=16,
-            n_steps=12,
-            burn_in=4,
-            thin=2,
-            noise_level=0.1,
-        ),
-        warm_start=WarmStartConfig(
-            use_neighbor_samples=True,
-            jitter_std_norm=0.03,
-            exploration_fraction=0.25,
-            max_neighbor_samples=512,
-            broad_init_scale=0.25,
-        ),
-        checkpoint_every=1,
-        max_nodes=4,
-        save_samples=False,
+    warm_start_cfg = WarmStartConfig(
+        use_neighbor_samples=True,
+        jitter_std_norm=0.03,
+        exploration_fraction=0.25,
+        max_neighbor_samples=512,
+        broad_init_scale=0.25,
     )
 
     with tempfile.TemporaryDirectory(prefix="mcmc_gpu_batched_validate_") as tmpdir:
-        result = fit_cube_mcmc_resumable_gpu(
-            cube=cube,
-            all_param_bounds=ALL_PARAM_BOUNDS_8D,
-            vary_indices=list(range(8)),
-            fixed_params=[0.0] * 8,
-            x_log_bounds=(4.0, 9.0),
-            segmentation="pixel",
-            block_k=1,
-            valid_mask=None,
-            out_dir=tmpdir,
-            resume_path=str(Path(tmpdir) / "resume.npz"),
-            cube_cfg=cube_cfg,
-            forward_backend=backend,
-            seed=12345,
-        )
+        if sampler_name == "emcee":
+            cube_cfg = CubeSamplingConfig(
+                sampling=SamplingConfig(
+                    n_walkers=16,
+                    n_steps=12,
+                    burn_in=4,
+                    thin=2,
+                    noise_level=0.1,
+                ),
+                warm_start=warm_start_cfg,
+                checkpoint_every=1,
+                max_nodes=4,
+                save_samples=False,
+            )
+            result = fit_cube_mcmc_resumable_gpu(
+                cube=cube,
+                all_param_bounds=ALL_PARAM_BOUNDS_8D,
+                vary_indices=list(range(8)),
+                fixed_params=[0.0] * 8,
+                x_log_bounds=(4.0, 9.0),
+                segmentation="pixel",
+                block_k=1,
+                valid_mask=None,
+                out_dir=tmpdir,
+                resume_path=str(Path(tmpdir) / "resume.npz"),
+                cube_cfg=cube_cfg,
+                forward_backend=backend,
+                seed=12345,
+            )
+        elif sampler_name == "jax-ess":
+            cube_cfg = CubeJaxEssConfig(
+                sampling=JaxEssSamplingConfig(
+                    num_chains=16,
+                    num_warmup=4,
+                    num_samples=8,
+                    thinning=1,
+                    noise_level=0.1,
+                    max_steps=128,
+                    max_iter=128,
+                    init_mu=2.0,
+                    tune_mu=True,
+                    randomize_split=True,
+                    progress_bar=False,
+                    jax_device_platform="gpu" if backend_name == "cuda" else "cpu",
+                    xla_lib_path=xla_lib_path,
+                ),
+                warm_start=warm_start_cfg,
+                checkpoint_every=1,
+                max_nodes=4,
+                save_samples=False,
+            )
+            result = fit_cube_mcmc_resumable_jax_ess(
+                cube=cube,
+                all_param_bounds=ALL_PARAM_BOUNDS_8D,
+                vary_indices=list(range(8)),
+                fixed_params=[0.0] * 8,
+                x_log_bounds=(4.0, 9.0),
+                segmentation="pixel",
+                block_k=1,
+                valid_mask=None,
+                out_dir=tmpdir,
+                resume_path=str(Path(tmpdir) / "resume.npz"),
+                cube_cfg=cube_cfg,
+                seed=12345,
+            )
+        elif sampler_name == "jax-aies":
+            cube_cfg = CubeJaxAiesConfig(
+                sampling=JaxAiesSamplingConfig(
+                    num_chains=16,
+                    num_warmup=4,
+                    num_samples=8,
+                    thinning=1,
+                    noise_level=0.1,
+                    randomize_split=True,
+                    progress_bar=False,
+                    moves=(("de", 1.0),),
+                    jax_device_platform="gpu" if backend_name == "cuda" else "cpu",
+                    xla_lib_path=xla_lib_path,
+                ),
+                warm_start=warm_start_cfg,
+                checkpoint_every=1,
+                max_nodes=4,
+                save_samples=False,
+            )
+            result = fit_cube_mcmc_resumable_jax_aies(
+                cube=cube,
+                all_param_bounds=ALL_PARAM_BOUNDS_8D,
+                vary_indices=list(range(8)),
+                fixed_params=[0.0] * 8,
+                x_log_bounds=(4.0, 9.0),
+                segmentation="pixel",
+                block_k=1,
+                valid_mask=None,
+                out_dir=tmpdir,
+                resume_path=str(Path(tmpdir) / "resume.npz"),
+                cube_cfg=cube_cfg,
+                seed=12345,
+            )
+        else:
+            raise ValueError(f"Unknown sampler: {sampler_name}")
 
     print("Tiny cube smoke test")
     print(f"backend: {backend_name}")
+    print(f"sampler: {sampler_name}")
     print(f"cube_shape: {cube.shape}")
     print(f"done_nodes: {int(np.count_nonzero(result.done_nodes))}/{result.done_nodes.size}")
     print(f"theta_map_shape: {result.theta_map.shape}")
@@ -200,14 +280,16 @@ def validate_tiny_cube(lib_path: str, backend_name: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate the GPU-batched MCMC forward adapter.")
     parser.add_argument("--lib", default="source/MWTransferArr.so", help="Path to MWTransferArr shared library")
+    parser.add_argument("--xla-lib", default="source/MWTransferArrXLA.so", help="Path to MWTransferArrXLA shared library")
     parser.add_argument("--backend", default="cuda", choices=["cpu", "cuda"], help="Native backend")
+    parser.add_argument("--sampler", default="emcee", choices=["emcee", "jax-ess", "jax-aies"], help="Sampler backend for cube mode")
     parser.add_argument("--mode", default="all", choices=["spectra", "cube", "all"], help="Validation mode")
     args = parser.parse_args()
 
     if args.mode in {"spectra", "all"}:
         validate_spectra(args.lib, args.backend)
     if args.mode in {"cube", "all"}:
-        validate_tiny_cube(args.lib, args.backend)
+        validate_tiny_cube(args.lib, args.backend, args.sampler, args.xla_lib)
 
 
 if __name__ == "__main__":

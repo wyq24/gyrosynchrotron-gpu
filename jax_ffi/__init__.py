@@ -1,31 +1,43 @@
-"""Thin compatibility wrapper for the staged NumPyro ESS integration."""
+"""Helpers for the staged JAX integration work."""
 
-from jax_ffi.numpyro_ess import (
+from .numpyro_ess import (
+    AIESRunConfig,
     ESSRunConfig,
     ESSRunResult,
     JAXFfiLegacyObservableForwardModel,
     JAXForwardModelProtocol,
     JAXLogDensityConfig,
+    ReusableAIESMcmcRunner,
+    ReusableESSMcmcRunner,
     TODOJAXForwardModel,
+    build_dynamic_logdensity,
+    build_dynamic_numpyro_factor_model,
     build_logdensity,
     build_numpyro_factor_model,
     build_potential_fn,
     denormalize_posterior_samples,
     make_initial_ensemble,
+    run_aies_mcmc,
     run_ess_mcmc,
 )
 
 __all__ = [
+    "AIESRunConfig",
     "ESSRunConfig",
     "ESSRunResult",
     "JAXFfiLegacyObservableForwardModel",
     "JAXForwardModelProtocol",
     "JAXLogDensityConfig",
+    "ReusableAIESMcmcRunner",
+    "ReusableESSMcmcRunner",
     "TODOJAXForwardModel",
+    "build_dynamic_logdensity",
+    "build_dynamic_numpyro_factor_model",
     "build_logdensity",
     "build_numpyro_factor_model",
     "build_potential_fn",
     "denormalize_posterior_samples",
     "make_initial_ensemble",
+    "run_aies_mcmc",
     "run_ess_mcmc",
 ]
